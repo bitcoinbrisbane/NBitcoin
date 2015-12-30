@@ -2,6 +2,7 @@
 using NBitcoin.Protocol;
 using NBitcoin.Protocol.Behaviors;
 using NBitcoin.SPV;
+using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -34,6 +35,11 @@ namespace NBitcoin.Tests
 		{
 			var tx = new Transaction();
 			tx.Outputs.Add(new TxOut(value, scriptPubKey));
+			return BroadcastTransaction(tx);
+		}
+
+		public Transaction BroadcastTransaction(Transaction tx)
+		{
 			var h = tx.GetHash();
 			Mempool.Add(h, tx);
 			OnNewTransaction(tx);
@@ -137,6 +143,11 @@ namespace NBitcoin.Tests
 			{
 				_Filter = filterload.Object;
 			}
+			var filteradd = message.Message.Payload as FilterAddPayload;
+			if(filteradd != null)
+			{
+				_Filter.Insert(filteradd.Data);
+			}
 			var getdata = message.Message.Payload as GetDataPayload;
 			if(getdata != null)
 			{
@@ -154,8 +165,17 @@ namespace NBitcoin.Tests
 							}
 						}
 					}
-					if(inv.Type == InventoryType.MSG_TX)
-						AttachedNode.SendMessageAsync(new TxPayload(_Transactions[inv.Hash]));
+					var found = FindTransaction(inv.Hash);
+					if(inv.Type == InventoryType.MSG_TX && found != null)
+						AttachedNode.SendMessageAsync(new TxPayload(found));
+				}
+			}
+			var mempool = message.Message.Payload as MempoolPayload;
+			if(mempool != null)
+			{
+				foreach(var tx in _Builder.Mempool)
+				{
+					BroadcastCore(tx.Value);
 				}
 			}
 		}
@@ -166,6 +186,11 @@ namespace NBitcoin.Tests
 		void _Builder_NewTransaction(Transaction obj)
 		{
 			_Transactions.AddOrReplace(obj.GetHash(), obj);
+			BroadcastCore(obj);
+		}
+
+		private void BroadcastCore(Transaction obj)
+		{
 			if(_Builder.Broadcast)
 				if(_Filter != null && _Filter.IsRelevantAndUpdate(obj) && _Known.TryAdd(obj.GetHash(), obj.GetHash()))
 				{
@@ -197,6 +222,11 @@ namespace NBitcoin.Tests
 			behavior._Blocks = _Blocks;
 			behavior._Transactions = _Transactions;
 			return behavior;
+		}
+
+		Transaction FindTransaction(uint256 id)
+		{
+			return _Builder.Mempool.TryGet(id) ?? _Transactions.TryGet(id);
 		}
 
 		#endregion
@@ -238,36 +268,157 @@ namespace NBitcoin.Tests
 			});
 		}
 
-		public void CanSyncWalletCore(WalletCreation creation)
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void CanSyncWallet2()
 		{
 			using(NodeServerTester servers = new NodeServerTester(Network.TestNet))
 			{
 				var chainBuilder = new BlockchainBuilder();
+				SetupSPVBehavior(servers, chainBuilder);
+				NodesGroup aliceConnection = CreateGroup(servers, 1);
+				NodesGroup bobConnection = CreateGroup(servers, 1);
 
-				//Simulate SPV compatible server
-				servers.Server1.InboundNodeConnectionParameters.Services = NodeServices.Network;
-				servers.Server1.InboundNodeConnectionParameters.TemplateBehaviors.Add(new ChainBehavior(chainBuilder.Chain)
+				var aliceKey = new ExtKey();
+				Wallet alice = new Wallet(new WalletCreation()
 				{
-					AutoSync = false
-				});
-				servers.Server1.InboundNodeConnectionParameters.TemplateBehaviors.Add(new SPVBehavior(chainBuilder));
-				/////////////
+					Network = Network.TestNet,
+					RootKeys = new[] { aliceKey.Neuter() },
+					SignatureRequired = 1,
+					UseP2SH = false
+				}, 11);
+				Wallet bob = new Wallet(new WalletCreation()
+				{
+					Network = Network.TestNet,
+					RootKeys = new[] { new ExtKey().Neuter() },
+					SignatureRequired = 1,
+					UseP2SH = false
+				}, 11);
 
-				//The SPV client does not verify the chain and keep one connection alive with Server1
-				NodeConnectionParameters parameters = new NodeConnectionParameters();
-				Wallet.ConfigureDefaultNodeConnectionParameters(parameters);
-				parameters.IsTrusted = true;
-				AddressManagerBehavior addrman = new AddressManagerBehavior(new AddressManager());
-				addrman.AddressManager.Add(new NetworkAddress(servers.Server1.ExternalEndpoint), IPAddress.Parse("127.0.0.1"));
-				parameters.TemplateBehaviors.Add(addrman);
-				NodesGroup connected = new NodesGroup(Network.TestNet, parameters);
-				connected.AllowSameGroup = true;
-				connected.MaximumNodeConnection = 1;
-				/////////////
+				alice.Configure(aliceConnection);
+				alice.Connect();
 
+				bob.Configure(bobConnection);
+				bob.Connect();
+
+				TestUtils.Eventually(() => aliceConnection.ConnectedNodes.Count == 1);
+
+				//New address tracked
+				var addressAlice = alice.GetNextScriptPubKey();
+				chainBuilder.GiveMoney(addressAlice, Money.Coins(1.0m));
+				TestUtils.Eventually(() => aliceConnection.ConnectedNodes.Count == 0); //Purge
+				TestUtils.Eventually(() => aliceConnection.ConnectedNodes.Count == 1); //Reconnect
+				//////
+
+				TestUtils.Eventually(() => alice.GetTransactions().Count == 1);
+
+				//Alice send tx to bob
+				var coins = alice.GetTransactions().GetSpendableCoins();
+				var keys = coins.Select(c => alice.GetKeyPath(c.ScriptPubKey))
+								.Select(k => aliceKey.Derive(k))
+								.ToArray();				
+				var builder = new TransactionBuilder();
+				var tx =
+					builder
+					.SetTransactionPolicy(new Policy.StandardTransactionPolicy()
+					{
+						MinRelayTxFee = new FeeRate(0)
+					})
+					.AddCoins(coins)
+					.AddKeys(keys)
+					.Send(bob.GetNextScriptPubKey(), Money.Coins(0.4m))
+					.SetChange(alice.GetNextScriptPubKey(true))
+					.BuildTransaction(true);				
+
+				Assert.True(builder.Verify(tx));
+
+				chainBuilder.BroadcastTransaction(tx);
+
+				//Alice get change
+				TestUtils.Eventually(() => alice.GetTransactions().Count == 2);
+				coins = alice.GetTransactions().GetSpendableCoins();
+				Assert.True(coins.Single().Amount == Money.Coins(0.6m)); 
+				//////
+
+				//Bob get coins
+				TestUtils.Eventually(() => bob.GetTransactions().Count == 1); 
+				coins = bob.GetTransactions().GetSpendableCoins();
+				Assert.True(coins.Single().Amount == Money.Coins(0.4m)); 
+				//////
+
+
+				MemoryStream bobWalletBackup = new MemoryStream();
+				bob.Save(bobWalletBackup);
+				bobWalletBackup.Position = 0;
+
+				MemoryStream bobTrakerBackup = new MemoryStream();
+				bob.Tracker.Save(bobTrakerBackup);
+				bobTrakerBackup.Position = 0;
+
+				bob.Disconnect();
+				
+				//Restore bob
+				bob = Wallet.Load(bobWalletBackup);
+				bobConnection.NodeConnectionParameters.TemplateBehaviors.Remove<TrackerBehavior>();
+				bobConnection.NodeConnectionParameters.TemplateBehaviors.Add(new TrackerBehavior(Tracker.Load(bobTrakerBackup), chainBuilder.Chain));
+				/////
+
+				bob.Configure(bobConnection);
+
+				//Bob still has coins
+				TestUtils.Eventually(() => bob.GetTransactions().Count == 1);
+				coins = bob.GetTransactions().GetSpendableCoins();
+				Assert.True(coins.Single().Amount == Money.Coins(0.4m));
+				//////
+
+				bob.Connect();
+				TestUtils.Eventually(() => bobConnection.ConnectedNodes.Count == 1);
+
+				//New block found !
+				chainBuilder.FindBlock();
+
+				//Alice send tx to bob
+				coins = alice.GetTransactions().GetSpendableCoins();
+				keys = coins.Select(c => alice.GetKeyPath(c.ScriptPubKey))
+								.Select(k => aliceKey.Derive(k))
+								.ToArray();				
+				builder = new TransactionBuilder();
+				tx =
+					builder
+					.SetTransactionPolicy(new Policy.StandardTransactionPolicy()
+					{
+						MinRelayTxFee = new FeeRate(0)
+					})
+					.AddCoins(coins)
+					.AddKeys(keys)
+					.Send(bob.GetNextScriptPubKey(), Money.Coins(0.1m))
+					.SetChange(alice.GetNextScriptPubKey(true))
+					.BuildTransaction(true);
+
+				Assert.True(builder.Verify(tx));
+
+				chainBuilder.BroadcastTransaction(tx);
+
+				//Bob still has coins
+				TestUtils.Eventually(() => bob.GetTransactions().Count == 2); //Bob has both, old and new tx
+				coins = bob.GetTransactions().GetSpendableCoins();
+				//////
+			}
+		}
+
+		public void CanSyncWalletCore(WalletCreation creation)
+		{
+			using(NodeServerTester servers = new NodeServerTester(Network.TestNet))
+			{
+				var notifiedTransactions = new List<WalletTransaction>();
+				var chainBuilder = new BlockchainBuilder();
+				SetupSPVBehavior(servers, chainBuilder);
+				NodesGroup connected = CreateGroup(servers, 1);
 				Wallet wallet = new Wallet(creation, keyPoolSize: 11);
+				wallet.NewWalletTransaction += (s, a) => notifiedTransactions.Add(a);
 				Assert.True(wallet.State == WalletState.Created);
-				wallet.Connect(connected);
+				wallet.Configure(connected);
+				wallet.Connect();
 				Assert.True(wallet.State == WalletState.Disconnected);
 				TestUtils.Eventually(() => connected.ConnectedNodes.Count == 1);
 				Assert.True(wallet.State == WalletState.Connected);
@@ -284,19 +435,31 @@ namespace NBitcoin.Tests
 				TestUtils.Eventually(() => servers.Server1.ConnectedNodes.Count == 1);
 				var spv = servers.Server1.ConnectedNodes.First().Behaviors.Find<SPVBehavior>();
 				TestUtils.Eventually(() => spv._Filter != null);
-
 				var k = wallet.GetNextScriptPubKey();
+				Assert.NotNull(wallet.GetKeyPath(k));
+				if(creation.UseP2SH)
+				{
+					var p2sh = k.GetDestinationAddress(Network.TestNet) as BitcoinScriptAddress;
+					Assert.NotNull(p2sh);
+					var redeem = wallet.GetRedeemScript(p2sh);
+					Assert.NotNull(redeem);
+					Assert.Equal(redeem.Hash, p2sh.Hash);
+				}
+
 				Assert.Equal(creation.UseP2SH, k.GetDestinationAddress(Network.TestNet) is BitcoinScriptAddress);
 				chainBuilder.GiveMoney(k, Money.Coins(1.0m));
 				TestUtils.Eventually(() => wallet.GetTransactions().Count == 1);
+				Assert.Equal(1, notifiedTransactions.Count);
 				chainBuilder.FindBlock();
 				TestUtils.Eventually(() => wallet.GetTransactions().Where(t => t.BlockInformation != null).Count() == 1);
+				Assert.Equal(2, notifiedTransactions.Count);
 
 				chainBuilder.Broadcast = false;
 				chainBuilder.GiveMoney(k, Money.Coins(1.5m));
 				chainBuilder.Broadcast = true;
 				chainBuilder.FindBlock();
 				TestUtils.Eventually(() => wallet.GetTransactions().Summary.Confirmed.TransactionCount == 2);
+				Assert.Equal(3, notifiedTransactions.Count);
 
 				chainBuilder.Broadcast = false;
 				for(int i = 0 ; i < 30 ; i++)
@@ -310,18 +473,125 @@ namespace NBitcoin.Tests
 				//Sync automatically
 				TestUtils.Eventually(() => wallet.GetTransactions().Summary.Confirmed.TransactionCount == 3);
 
+				//Save and restore wallet
 				MemoryStream ms = new MemoryStream();
 				wallet.Save(ms);
 				ms.Position = 0;
 				var wallet2 = Wallet.Load(ms);
-				wallet2.Connect(connected);
+				//////
+
+				//Save and restore tracker
+				ms = new MemoryStream();
+				var tracker = connected.NodeConnectionParameters.TemplateBehaviors.Find<TrackerBehavior>();
+				connected.NodeConnectionParameters.TemplateBehaviors.Remove(tracker);
+				tracker.Tracker.Save(ms);
+				ms.Position = 0;
+				tracker = new TrackerBehavior(Tracker.Load(ms), wallet.Chain);
+				connected.NodeConnectionParameters.TemplateBehaviors.Add(tracker);
+				//////
+
+				wallet2.Configure(connected);
+				wallet2.Connect();
 				Assert.Equal(wallet.Created, wallet2.Created);
 				Assert.Equal(wallet.GetNextScriptPubKey(), wallet2.GetNextScriptPubKey());
 				Assert.True(wallet.GetKnownScripts().Length == wallet2.GetKnownScripts().Length);
+				TestUtils.Eventually(() => wallet2.GetTransactions().Summary.Confirmed.TransactionCount == 3);
 
 				var fork = wallet.Chain.FindFork(wallet2._ScanLocation);
-				Assert.True(fork.Height == chainBuilder.Chain.Height - 5);
+				Assert.True(fork.Height == chainBuilder.Chain.Height);
 			}
+		}
+
+		private static void SetupSPVBehavior(NodeServerTester servers, BlockchainBuilder chainBuilder)
+		{
+			foreach(var server in new[] { servers.Server1, servers.Server2 })
+			{
+				server.InboundNodeConnectionParameters.Services = NodeServices.Network;
+				//Simulate SPV compatible server
+				server.InboundNodeConnectionParameters.TemplateBehaviors.Add(new ChainBehavior(chainBuilder.Chain)
+				{
+					AutoSync = false
+				});
+				server.InboundNodeConnectionParameters.TemplateBehaviors.Add(new SPVBehavior(chainBuilder));
+				/////////////
+			}
+		}
+
+
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void UseFilterAddIfKeyPoolSizeIsZero()
+		{
+			using(NodeServerTester servers = new NodeServerTester(Network.TestNet))
+			{
+				var chainBuilder = new BlockchainBuilder();
+				SetupSPVBehavior(servers, chainBuilder);
+
+				var connected = CreateGroup(servers, 1);
+
+				Wallet wallet = new Wallet(new WalletCreation()
+				{
+					Network = Network.TestNet,
+					RootKeys = new[] { new ExtKey().Neuter() },
+					UseP2SH = true
+				}, keyPoolSize: 0);
+				Assert.True(wallet.State == WalletState.Created);
+				wallet.Configure(connected);
+				wallet.Connect();
+				Assert.True(wallet.State == WalletState.Disconnected);
+				TestUtils.Eventually(() => connected.ConnectedNodes.Count == 1);
+				Assert.True(wallet.State == WalletState.Connected);
+
+				var script = wallet.GetNextScriptPubKey(new KeyPath("0/1/2"));
+				Thread.Sleep(1000);
+				chainBuilder.GiveMoney(script, Money.Coins(0.001m));
+				TestUtils.Eventually(() => wallet.GetTransactions().Count == 1);
+				wallet.Disconnect();
+				TestUtils.Eventually(() => connected.ConnectedNodes.Count == 0);
+
+				MemoryStream ms = new MemoryStream();
+				wallet.Save(ms);
+				ms.Position = 0;
+				var wallet2 = Wallet.Load(ms);
+				wallet2.Configure(connected);
+				wallet2.Connect();
+
+				var script2 = wallet2.GetNextScriptPubKey(new KeyPath("0/1/2"));
+				Thread.Sleep(1000);
+				Assert.NotEqual(script, script2);
+				Assert.NotNull(wallet2.GetRedeemScript(script));
+				Assert.NotNull(wallet2.GetRedeemScript(script2));
+				TestUtils.Eventually(() => connected.ConnectedNodes.Count == 1);
+				var spv = servers.Server1.ConnectedNodes.First().Behaviors.Find<SPVBehavior>();
+				TestUtils.Eventually(() => spv._Filter != null);
+				chainBuilder.GiveMoney(script2, Money.Coins(0.001m));
+				TestUtils.Eventually(() => wallet.GetTransactions().Count == 2);
+				chainBuilder.GiveMoney(script, Money.Coins(0.002m));
+				TestUtils.Eventually(() => wallet.GetTransactions().Count == 3);
+				chainBuilder.FindBlock();
+				TestUtils.Eventually(() => wallet.GetTransactions().Count == 3 && wallet.GetTransactions().All(t => t.BlockInformation != null));
+			}
+		}
+
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void CanAddScriptsToWallet()
+		{
+			Wallet wallet = new Wallet(new WalletCreation()
+			{
+				DerivationPath = new KeyPath("56"),
+				Name = "MyWallet",
+				RootKeys = new[] { new ExtKey().Neuter() },
+				SignatureRequired = 1,
+				UseP2SH = false
+			}, 11);
+
+			wallet.Configure();
+			Assert.True(wallet.GetKnownScripts(true).Length == 0);
+			Assert.True(wallet.GetKnownScripts(false).Length == 0);
+			wallet.GetNextScriptPubKey();
+			Assert.True(wallet.GetKnownScripts(false).Length == 11); //11 normal
+			Assert.True(wallet.GetKnownScripts(true).Length == 1);
 		}
 
 
@@ -408,25 +678,15 @@ namespace NBitcoin.Tests
 		[Trait("UnitTest", "UnitTest")]
 		public void CanMaintainConnectionToNodes()
 		{
+
 			using(NodeServerTester servers = new NodeServerTester(Network.TestNet))
 			{
-				servers.Server1.InboundNodeConnectionParameters.Services = NodeServices.Network;
-				AddressManagerBehavior behavior = new AddressManagerBehavior(new AddressManager());
-				behavior.AddressManager.Add(new NetworkAddress(servers.Server1.ExternalEndpoint), IPAddress.Parse("127.0.0.1"));
-				NodeConnectionParameters parameters = new NodeConnectionParameters();
-				parameters.TemplateBehaviors.Add(behavior);
-				NodesGroup connected = new NodesGroup(Network.TestNet, parameters, new NodeRequirement()
-				{
-					RequiredServices = NodeServices.Network
-				});
-				connected.AllowSameGroup = true;
-				connected.MaximumNodeConnection = 2;
+				NodesGroup connected = CreateGroup(servers, 2);
 				connected.Connect();
-
 				TestUtils.Eventually(() => connected.ConnectedNodes.Count == 2);
 
 				//Server crash abruptly
-				servers.Server1.ConnectedNodes.First().Disconnect();
+				servers.ConnectedNodes.First().Disconnect();
 				TestUtils.Eventually(() => connected.ConnectedNodes.Count == 1);
 
 				//Reconnect ?
@@ -438,7 +698,31 @@ namespace NBitcoin.Tests
 
 				//Reconnect ?
 				TestUtils.Eventually(() => connected.ConnectedNodes.Count == 2);
+				connected.Disconnect();
+				TestUtils.Eventually(() => connected.ConnectedNodes.Count == 0);
 			}
+
+		}
+
+		private static NodesGroup CreateGroup(NodeServerTester servers, int connections)
+		{
+			AddressManagerBehavior behavior = new AddressManagerBehavior(new AddressManager());
+			if(connections == 1)
+			{
+				behavior.AddressManager.Add(new NetworkAddress(servers.Server1.ExternalEndpoint), IPAddress.Parse("127.0.0.1"));
+			}
+			if(connections > 1)
+			{
+				behavior.AddressManager.Add(new NetworkAddress(servers.Server2.ExternalEndpoint), IPAddress.Parse("127.0.0.1"));
+			}
+			NodeConnectionParameters parameters = new NodeConnectionParameters();
+			parameters.TemplateBehaviors.Add(behavior);
+			Wallet.ConfigureDefaultNodeConnectionParameters(parameters);
+			parameters.IsTrusted = true;
+			NodesGroup connected = new NodesGroup(Network.TestNet, parameters);
+			connected.AllowSameGroup = true;
+			connected.MaximumNodeConnection = connections;
+			return connected;
 		}
 
 		[Fact]

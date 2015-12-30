@@ -235,12 +235,12 @@ namespace NBitcoin
 					return "OP_CHECKMULTISIG";
 				case OpcodeType.OP_CHECKMULTISIGVERIFY:
 					return "OP_CHECKMULTISIGVERIFY";
+				case OpcodeType.OP_CHECKLOCKTIMEVERIFY:
+					return "OP_CLTV";
 
 				// expanson
 				case OpcodeType.OP_NOP1:
 					return "OP_NOP1";
-				case OpcodeType.OP_NOP2:
-					return "OP_NOP2";
 				case OpcodeType.OP_NOP3:
 					return "OP_NOP3";
 				case OpcodeType.OP_NOP4:
@@ -278,6 +278,9 @@ namespace NBitcoin
 				if(name != "OP_UNKNOWN")
 					_OpcodeByName.Add(name, code);
 			}
+			_OpcodeByName.Add("OP_CHECKLOCKTIMEVERIFY", OpcodeType.OP_CHECKLOCKTIMEVERIFY);
+			_OpcodeByName.Add("OP_HODL", OpcodeType.OP_CHECKLOCKTIMEVERIFY);
+			_OpcodeByName.Add("OP_NOP2", OpcodeType.OP_CHECKLOCKTIMEVERIFY);
 		}
 		public static bool GetOpCode(string name, out OpcodeType result)
 		{
@@ -291,6 +294,10 @@ namespace NBitcoin
 #endif
 		{
 			return GetPushOp(Utils.BigIntegerToBytes(data));
+		}
+		public static Op GetPushOp(long value)
+		{
+			return GetPushOp(Utils.BigIntegerToBytes(new BigInteger(value)));
 		}
 		public static Op GetPushOp(byte[] data)
 		{
@@ -336,7 +343,7 @@ namespace NBitcoin
 		}
 
 		OpcodeType _Code;
-		static readonly bool[] _ValidOpCode;		
+		static readonly bool[] _ValidOpCode;
 
 		private static bool[] GetValidOpCode()
 		{

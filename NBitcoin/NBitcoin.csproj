@@ -77,6 +77,8 @@
     </Compile>
     <Compile Include="BitcoinCore\CachedBlockProvider.cs" />
     <Compile Include="BitWriter.cs" />
+    <Compile Include="FeeRate.cs" />
+    <Compile Include="Policy\ITransactionPolicy.cs" />
     <Compile Include="JsonConverters\BitcoinSerializableJsonConverter.cs" />
     <Compile Include="JsonConverters\MoneyJsonConverter.cs" />
     <Compile Include="JsonConverters\ScriptJsonConverter.cs" />
@@ -86,6 +88,7 @@
     <Compile Include="MicroPayment\MicroChannelArguments.cs" />
     <Compile Include="MicroPayment\PayeeEndpoint.cs" />
     <Compile Include="MicroPayment\PayerEndpoint.cs" />
+    <Compile Include="Policy\MinerTransactionPolicy.cs" />
     <Compile Include="MnemonicReference.cs" />
     <Compile Include="CachedNoSqlRepository.cs" />
     <Compile Include="CachedTransactionRepository.cs" />
@@ -136,8 +139,10 @@
     <Compile Include="Protocol\Behaviors\NodesGroupBehavior.cs" />
     <Compile Include="Protocol\Behaviors\NodeBehavior.cs" />
     <Compile Include="Protocol\Behaviors\PingPongBehavior.cs" />
+    <Compile Include="Protocol\Payloads\FilterAddPayload.cs" />
     <Compile Include="Protocol\Payloads\UTxOutpusPayload.cs" />
     <Compile Include="RPC\RestClient.cs" />
+    <Compile Include="Policy\StandardTransactionPolicy.cs" />
     <Compile Include="Utils\ActionDisposable.cs" />
     <Compile Include="Utils\ThreadSafeCollection.cs" />
     <Compile Include="Protocol\NodeConnectionParameters.cs" />

@@ -1,9 +1,11 @@
 ﻿using NBitcoin.DataEncoders;
 using NBitcoin.OpenAsset;
+using NBitcoin.Policy;
 using NBitcoin.Stealth;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Threading.Tasks;
 using Builder = System.Func<NBitcoin.TransactionBuilder.TransactionBuildingContext, NBitcoin.IMoney>;
@@ -143,7 +145,6 @@ namespace NBitcoin
 
 		#endregion
 	}
-
 
 	/// <summary>
 	/// Exception thrown when not enough funds are present for verifying or building a transaction
@@ -430,7 +431,7 @@ namespace NBitcoin
 		{
 			_Rand = new Random();
 			CoinSelector = new DefaultCoinSelector();
-			ColoredDust = Money.Dust;
+			StandardTransactionPolicy = new StandardTransactionPolicy();
 			DustPrevention = true;
 		}
 		internal Random _Rand;
@@ -438,7 +439,7 @@ namespace NBitcoin
 		{
 			_Rand = new Random(seed);
 			CoinSelector = new DefaultCoinSelector(seed);
-			ColoredDust = Money.Dust;
+			StandardTransactionPolicy = new StandardTransactionPolicy();
 			DustPrevention = true;
 		}
 
@@ -449,7 +450,7 @@ namespace NBitcoin
 		}
 
 		/// <summary>
-		/// Will transform transfers below 600 satoshi to fees, so the transaction get correctly relayed by the network.
+		/// Will transform transfers below Dust, so the transaction get correctly relayed by the network.
 		/// </summary>
 		public bool DustPrevention
 		{
@@ -544,7 +545,7 @@ namespace NBitcoin
 		{
 			if(amount < Money.Zero)
 				throw new ArgumentOutOfRangeException("amount", "amount can't be negative");
-			if(DustPrevention && amount < ColoredDust && !_OpReturnTemplate.CheckScriptPubKey(scriptPubKey))
+			if(DustPrevention && amount < GetDust(scriptPubKey) && !_OpReturnTemplate.CheckScriptPubKey(scriptPubKey))
 			{
 				SendFees(amount);
 				return this;
@@ -629,9 +630,10 @@ namespace NBitcoin
 			if(changeAmount.Quantity == 0)
 				return changeAmount;
 			var marker = ctx.GetColorMarker(false);
-			var txout = ctx.Transaction.AddOutput(new TxOut(ColoredDust, ctx.Group.ChangeScript[(int)ChangeType.Colored]));
+			var script = ctx.Group.ChangeScript[(int)ChangeType.Colored];
+			var txout = ctx.Transaction.AddOutput(new TxOut(GetDust(script), script));
 			marker.SetQuantity(ctx.Transaction.Outputs.Count - 2, changeAmount.Quantity);
-			ctx.AdditionalFees += ColoredDust;
+			ctx.AdditionalFees += txout.Value;
 			return changeAmount;
 		}
 
@@ -655,18 +657,36 @@ namespace NBitcoin
 			builders.Add(ctx =>
 			{
 				var marker = ctx.GetColorMarker(false);
-				ctx.Transaction.AddOutput(new TxOut(ColoredDust, scriptPubKey));
+				var txout = ctx.Transaction.AddOutput(new TxOut(GetDust(scriptPubKey), scriptPubKey));
 				marker.SetQuantity(ctx.Transaction.Outputs.Count - 2, asset.Quantity);
-				ctx.AdditionalFees += ColoredDust;
+				ctx.AdditionalFees += txout.Value;
 				return asset;
 			});
 			return this;
 		}
 
+		Money GetDust()
+		{
+			return GetDust(new Script(new byte[25]));
+		}
+		Money GetDust(Script script)
+		{
+			if(StandardTransactionPolicy == null || StandardTransactionPolicy.MinRelayTxFee == null)
+				return Money.Zero;
+			return new TxOut(Money.Zero, script).GetDustThreshold(StandardTransactionPolicy.MinRelayTxFee);
+		}
+
 		/// <summary>
-		/// The amount of satoshi to use for outputs bearing an Asset
+		/// Set transaction policy fluently
 		/// </summary>
-		public Money ColoredDust
+		/// <param name="policy">The policy</param>
+		/// <returns>this</returns>
+		public TransactionBuilder SetTransactionPolicy(StandardTransactionPolicy policy)
+		{
+			StandardTransactionPolicy = policy;
+			return this;
+		}
+		public StandardTransactionPolicy StandardTransactionPolicy
 		{
 			get;
 			set;
@@ -697,11 +717,6 @@ namespace NBitcoin
 			else
 				throw new InvalidOperationException("Op return already used for " + _OpReturnUser);
 
-			if(DustPrevention && amount < ColoredDust)
-			{
-				SendFees(amount);
-				return this;
-			}
 			CurrentGroup.Builders.Add(ctx =>
 			{
 				var payment = address.CreatePayment(ephemKey);
@@ -743,9 +758,9 @@ namespace NBitcoin
 					}
 				}
 
-				ctx.Transaction.Outputs.Insert(0, new TxOut(ColoredDust, scriptPubKey));
+				ctx.Transaction.Outputs.Insert(0, new TxOut(GetDust(scriptPubKey), scriptPubKey));
 				marker.Quantities = new[] { checked((ulong)asset.Quantity) }.Concat(marker.Quantities).ToArray();
-				ctx.AdditionalFees += ColoredDust;
+				ctx.AdditionalFees += ctx.Transaction.Outputs[0].Value;
 				return asset;
 			});
 			return this;
@@ -759,32 +774,29 @@ namespace NBitcoin
 			return this;
 		}
 
-		public TransactionBuilder SendEstimatedFees(Money feesPerKB)
-		{
-			var tx = BuildTransaction(false);
-			var fees = EstimateFees(tx, feesPerKB);
-			SendFees(fees);
-			return this;
-		}
-		public TransactionBuilder SendEstimatedFees()
-		{
-			return SendEstimatedFees(null);
-		}
-
 		/// <summary>
 		/// Split the estimated fees accross the several groups (separated by Then())
 		/// </summary>
-		/// <param name="fees"></param>
+		/// <param name="feeRate"></param>
 		/// <returns></returns>
-		public TransactionBuilder SendEstimatedFeesSplit(Money feesPerKB)
+		public TransactionBuilder SendEstimatedFees(FeeRate feeRate)
 		{
 			var tx = BuildTransaction(false);
-			var fees = EstimateFees(tx, feesPerKB);
-			return SendFeesSplit(fees);
+			var fees = EstimateFees(tx, feeRate);
+			SendFees(fees);
+			return this;
 		}
-		public TransactionBuilder SendEstimatedFeesSplit()
+
+		/// <summary>
+		/// Estimate the fee needed for the transaction, and split among groups
+		/// </summary>
+		/// <param name="feeRate"></param>
+		/// <returns></returns>
+		public TransactionBuilder SendEstimatedFeesSplit(FeeRate feeRate)
 		{
-			return SendEstimatedFeesSplit(null);
+			var tx = BuildTransaction(false);
+			var fees = EstimateFees(tx, feeRate);
+			return SendFeesSplit(fees);
 		}
 		/// <summary>
 		/// Split the fees accross the several groups (separated by Then())
@@ -879,7 +891,7 @@ namespace NBitcoin
 				}
 
 				ctx.AdditionalBuilders.Add(_ => _.AdditionalFees);
-				ctx.Dust = Money.Dust;
+				ctx.Dust = GetDust();
 				ctx.ChangeAmount = Money.Zero;
 				ctx.CoverOnly = group.CoverOnly;
 				ctx.ChangeType = ChangeType.Uncolored;
@@ -924,18 +936,21 @@ namespace NBitcoin
 				);
 			if(change.CompareTo(ctx.Dust) == 1)
 			{
-				if(group.ChangeScript[(int)ctx.ChangeType] == null)
+				var changeScript = group.ChangeScript[(int)ctx.ChangeType];
+				if(changeScript == null)
 					throw new InvalidOperationException("A change address should be specified (" + ctx.ChangeType + ")");
-
-				ctx.RestoreMemento(originalCtx);
-				ctx.ChangeAmount = change;
-				try
+				if(!(ctx.Dust is Money) || change.CompareTo(GetDust(changeScript)) == 1)
 				{
-					return BuildTransaction(ctx, group, builders, coins, zero);
-				}
-				finally
-				{
-					ctx.ChangeAmount = zero;
+					ctx.RestoreMemento(originalCtx);
+					ctx.ChangeAmount = change;
+					try
+					{
+						return BuildTransaction(ctx, group, builders, coins, zero);
+					}
+					finally
+					{
+						ctx.ChangeAmount = zero;
+					}
 				}
 			}
 			foreach(var coin in selection)
@@ -1020,45 +1035,129 @@ namespace NBitcoin
 		/// <summary>
 		/// Verify that a transaction is fully signed and have enough fees
 		/// </summary>
-		/// <param name="tx">The transaction to verify</param>
-		/// <param name="expectedFees">The expected fees (if null, do not verify)</param>
-		/// <returns>True if the verification pass</returns>
-		/// <exception cref="NBitcoin.NotEnoughFundsException">Not enough funds are available</exception>
-		public bool Verify(Transaction tx, Money expectedFees = null)
+		/// <param name="tx">The transaction to check</param>
+		/// <returns>True if no error</returns>
+		public bool Verify(Transaction tx)
 		{
-			Money spent = Money.Zero;
-			foreach(var input in tx.Inputs.AsIndexedInputs())
-			{
-				var duplicates = tx.Inputs.Count(_ => _.PrevOut == input.PrevOut);
-				if(duplicates != 1)
-					return false;
-				var coin = FindCoin(input.PrevOut);
-				if(coin == null)
-					throw CoinNotFound(input.TxIn);
-				spent += coin is IColoredCoin ? ((IColoredCoin)coin).Bearer.Amount : ((Coin)coin).Amount;
-				if(!input.VerifyScript(coin.TxOut.ScriptPubKey))
-					return false;
-			}
-			if(spent < tx.TotalOut)
-				throw new NotEnoughFundsException("Not enough funds in this transaction", null, tx.TotalOut - spent);
+			TransactionPolicyError[] errors;
+			return Verify(tx, null as Money, out errors);
+		}
+		/// <summary>
+		/// Verify that a transaction is fully signed and have enough fees
+		/// </summary>
+		/// <param name="tx">The transaction to check</param>
+		/// <param name="expectedFees">The expected fees (more or less 10%)</param>
+		/// <returns>True if no error</returns>
+		public bool Verify(Transaction tx, Money expectedFees)
+		{
+			TransactionPolicyError[] errors;
+			return Verify(tx, expectedFees, out errors);
+		}
 
-			var fees = (spent - tx.TotalOut);
+		/// <summary>
+		/// Verify that a transaction is fully signed and have enough fees
+		/// </summary>
+		/// <param name="tx">The transaction to check</param>
+		/// <param name="expectedFeeRate">The expected fee rate</param>
+		/// <returns>True if no error</returns>
+		public bool Verify(Transaction tx, FeeRate expectedFeeRate)
+		{
+			TransactionPolicyError[] errors;
+			return Verify(tx, expectedFeeRate, out errors);
+		}
+
+		/// <summary>
+		/// Verify that a transaction is fully signed and have enough fees
+		/// </summary>
+		/// <param name="tx">The transaction to check</param>
+		/// <param name="errors">Detected errors</param>
+		/// <returns>True if no error</returns>
+		public bool Verify(Transaction tx, out TransactionPolicyError[] errors)
+		{
+			return Verify(tx, null as Money, out errors);
+		}
+		/// <summary>
+		/// Verify that a transaction is fully signed, have enough fees, and follow the Standard and Miner Transaction Policy rules
+		/// </summary>
+		/// <param name="tx">The transaction to check</param>
+		/// <param name="expectedFees">The expected fees (more or less 10%)</param>
+		/// <param name="errors">Detected errors</param>
+		/// <returns>True if no error</returns>
+		public bool Verify(Transaction tx, Money expectedFees, out TransactionPolicyError[] errors)
+		{
+			if(tx == null)
+				throw new ArgumentNullException("tx");
+			var coins = tx.Inputs.Select(i => FindCoin(i.PrevOut)).Where(c => c != null).ToArray();
+			List<TransactionPolicyError> exceptions = new List<TransactionPolicyError>();
+			var policyErrors = MinerTransactionPolicy.Instance.Check(tx, coins);
+			exceptions.AddRange(policyErrors);
+			policyErrors = StandardTransactionPolicy.Check(tx, coins);
+			exceptions.AddRange(policyErrors);
 			if(expectedFees != null)
 			{
-				//Fees might be slightly different than expected because of dust prevention, so allow an error margin of 10%
-				var margin = 0.1m;
-				if(!DustPrevention)
-					margin = 0.0m;
-				if(!expectedFees.Almost(fees, margin))
-					throw new NotEnoughFundsException("Fees different than expected", null, expectedFees - fees);
+				var fees = tx.GetFee(coins);
+				if(fees != null)
+				{
+					Money margin = Money.Zero;
+					if(DustPrevention)
+						margin = GetDust() * 2;
+					if(!fees.Almost(expectedFees, margin))
+						exceptions.Add(new NotEnoughFundsPolicyError("Fees different than expected", expectedFees - fees));
+				}
 			}
-			return true;
+			errors = exceptions.ToArray();
+			return errors.Length == 0;
+		}
+		/// <summary>
+		/// Verify that a transaction is fully signed and have enough fees
+		/// </summary>
+		/// <param name="tx">The transaction to check</param>
+		/// <param name="expectedFeeRate">The expected fee rate</param>
+		/// <param name="errors">Detected errors</param>
+		/// <returns>True if no error</returns>
+		public bool Verify(Transaction tx, FeeRate expectedFeeRate, out TransactionPolicyError[] errors)
+		{
+			if(tx == null)
+				throw new ArgumentNullException("tx");
+			return Verify(tx, expectedFeeRate == null ? null : expectedFeeRate.GetFee(tx), out errors);
+		}
+		/// <summary>
+		/// Verify that a transaction is fully signed and have enough fees
+		/// </summary>
+		/// <param name="tx">he transaction to check</param>
+		/// <param name="expectedFeeRate">The expected fee rate</param>
+		/// <returns>Detected errors</returns>
+		public TransactionPolicyError[] Check(Transaction tx, FeeRate expectedFeeRate)
+		{
+			return Check(tx, expectedFeeRate == null ? null : expectedFeeRate.GetFee(tx));
+		}
+		/// <summary>
+		/// Verify that a transaction is fully signed and have enough fees
+		/// </summary>
+		/// <param name="tx">he transaction to check</param>
+		/// <param name="expectedFee">The expected fee</param>
+		/// <returns>Detected errors</returns>
+		public TransactionPolicyError[] Check(Transaction tx, Money expectedFee)
+		{
+			TransactionPolicyError[] errors;
+			Verify(tx, expectedFee, out errors);
+			return errors;
+		}
+		/// <summary>
+		/// Verify that a transaction is fully signed and have enough fees
+		/// </summary>
+		/// <param name="tx">he transaction to check</param>
+		/// <returns>Detected errors</returns>
+		public TransactionPolicyError[] Check(Transaction tx)
+		{
+			return Check(tx, null as Money);
 		}
 
-		private Exception CoinNotFound(TxIn txIn)
+		private CoinNotFoundException CoinNotFound(IndexedTxIn txIn)
 		{
-			return new KeyNotFoundException("Impossible to find the scriptPubKey of outpoint " + txIn.PrevOut);
+			return new CoinNotFoundException(txIn);
 		}
+
 
 		public ICoin FindCoin(OutPoint outPoint)
 		{
@@ -1066,6 +1165,20 @@ namespace NBitcoin
 			if(result == null && CoinFinder != null)
 				result = CoinFinder(outPoint);
 			return result;
+		}
+
+		/// <summary>
+		/// Find spent coins of a transaction
+		/// </summary>
+		/// <param name="tx">The transaction</param>
+		/// <returns>Array of size tx.Input.Count, if a coin is not fund, a null coin is returned.</returns>
+		public ICoin[] FindSpentCoins(Transaction tx)
+		{
+			return
+				tx
+				.Inputs
+				.Select(i => FindCoin(i.PrevOut))
+				.ToArray();
 		}
 
 		public int EstimateSize(Transaction tx)
@@ -1077,9 +1190,8 @@ namespace NBitcoin
 			var baseSize = clone.ToBytes().Length;
 
 			int inputSize = 0;
-			for(int i = 0 ; i < tx.Inputs.Count ; i++)
+			foreach(var txin in tx.Inputs.AsIndexedInputs())
 			{
-				var txin = tx.Inputs[i];
 				var coin = FindCoin(txin.PrevOut);
 				if(coin == null)
 					throw CoinNotFound(txin);
@@ -1133,24 +1245,17 @@ namespace NBitcoin
 		/// Estimate fees of an unsigned transaction
 		/// </summary>
 		/// <param name="tx"></param>
+		/// <param name="feeRate">Fee rate</param>
 		/// <returns></returns>
-		public Money EstimateFees(Transaction tx, Money feesPerKB)
+		public Money EstimateFees(Transaction tx, FeeRate feeRate)
 		{
-			if(feesPerKB == null)
-				feesPerKB = Money.Satoshis(10000);
-			var len = EstimateSize(tx);
-			long nBaseFee = feesPerKB.Satoshi;
-			long nMinFee = (1 + (long)len / 1000) * nBaseFee;
-			return new Money(nMinFee);
-		}
-		/// <summary>
-		/// Estimate fees of an unsigned transaction
-		/// </summary>
-		/// <param name="tx"></param>
-		/// <returns></returns>
-		public Money EstimateFees(Transaction tx)
-		{
-			return EstimateFees(tx, null);
+			if(tx == null)
+				throw new ArgumentNullException("tx");
+			if(feeRate == null)
+				throw new ArgumentNullException("feeRate");
+
+			var estimation = EstimateSize(tx);
+			return feeRate.GetFee(estimation);
 		}
 
 		private void Sign(TransactionSigningContext ctx, ICoin coin, IndexedTxIn txIn)
@@ -1318,7 +1423,7 @@ namespace NBitcoin
 			if(_CompletedTransaction == null)
 				throw new InvalidOperationException("A partially built transaction should be specified by calling ContinueToBuild");
 
-			var spent = _CompletedTransaction.Inputs.Select(txin =>
+			var spent = _CompletedTransaction.Inputs.AsIndexedInputs().Select(txin =>
 			{
 				var c = FindCoin(txin.PrevOut);
 				if(c == null)
@@ -1415,6 +1520,34 @@ namespace NBitcoin
 				return p2sh.RedeemScript.Hash.ScriptPubKey;
 			}
 			return null;
+		}
+	}
+
+	public class CoinNotFoundException : KeyNotFoundException
+	{
+		public CoinNotFoundException(IndexedTxIn txIn)
+			: base("No coin matching " + txIn.PrevOut + " was found")
+		{
+			_OutPoint = txIn.PrevOut;
+			_InputIndex = txIn.Index;
+		}
+
+		private readonly OutPoint _OutPoint;
+		public OutPoint OutPoint
+		{
+			get
+			{
+				return _OutPoint;
+			}
+		}
+
+		private readonly uint _InputIndex;
+		public uint InputIndex
+		{
+			get
+			{
+				return _InputIndex;
+			}
 		}
 	}
 }

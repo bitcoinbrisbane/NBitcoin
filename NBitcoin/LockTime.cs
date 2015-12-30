@@ -8,13 +8,15 @@ namespace NBitcoin
 {
 	public struct LockTime : IBitcoinSerializable
 	{
-		const uint LOCKTIME_THRESHOLD = 500000000;
+		internal const uint LOCKTIME_THRESHOLD = 500000000; // Tue Nov  5 00:53:20 1985 UTC
 		uint _value;
 
 
 		public LockTime(DateTimeOffset dateTime)
 		{
 			_value = Utils.DateTimeToUnixTime(dateTime);
+			if(_value < LOCKTIME_THRESHOLD)
+				throw new ArgumentOutOfRangeException("dateTime", "The minimum possible date is be Tue Nov  5 00:53:20 1985 UTC");
 		}
 		public LockTime(int valueOrHeight)
 		{
@@ -113,6 +115,11 @@ namespace NBitcoin
 		public static implicit operator uint(LockTime lockTime)
 		{
 			return lockTime._value;
+		}
+
+		public static implicit operator long(LockTime lockTime)
+		{
+			return (long)lockTime._value;
 		}
 
 		public override bool Equals(object obj)

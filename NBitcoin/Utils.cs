@@ -299,23 +299,23 @@ namespace NBitcoin
 		}
 
 
-		public static String BITCOIN_SIGNED_MESSAGE_HEADER = "Bitcoin Signed Message:\n";
-		public static byte[] BITCOIN_SIGNED_MESSAGE_HEADER_BYTES = Encoding.UTF8.GetBytes(BITCOIN_SIGNED_MESSAGE_HEADER);
+		internal static String BITCOIN_SIGNED_MESSAGE_HEADER = "Bitcoin Signed Message:\n";
+		internal static byte[] BITCOIN_SIGNED_MESSAGE_HEADER_BYTES = Encoding.UTF8.GetBytes(BITCOIN_SIGNED_MESSAGE_HEADER);
 
 		//http://bitcoinj.googlecode.com/git-history/keychain/core/src/main/java/com/google/bitcoin/core/Utils.java
-		public static byte[] FormatMessageForSigning(string messageText)
+		internal static byte[] FormatMessageForSigning(byte[] messageBytes)
 		{
 			MemoryStream ms = new MemoryStream();
-			var message = Encoding.UTF8.GetBytes(messageText);
 
 			ms.WriteByte((byte)BITCOIN_SIGNED_MESSAGE_HEADER_BYTES.Length);
 			Write(ms, BITCOIN_SIGNED_MESSAGE_HEADER_BYTES);
 
-			VarInt size = new VarInt((ulong)message.Length);
+			VarInt size = new VarInt((ulong)messageBytes.Length);
 			Write(ms, size.ToBytes());
-			Write(ms, message);
+			Write(ms, messageBytes);
 			return ms.ToArray();
 		}
+
 #if !NOSOCKET
 		internal static IPAddress MapToIPv6(IPAddress address)
 		{
@@ -416,12 +416,12 @@ namespace NBitcoin
 
 		static readonly TraceSource _TraceSource = new TraceSource("NBitcoin");
 
-		public static bool error(string msg, params object[] args)
+		internal static bool error(string msg, params object[] args)
 		{
 			_TraceSource.TraceEvent(TraceEventType.Error, 0, msg, args);
 			return false;
 		}
-		public static bool error(string msg)
+		internal static bool error(string msg)
 		{
 			_TraceSource.TraceEvent(TraceEventType.Error, 0, msg);
 			return false;
@@ -527,7 +527,7 @@ namespace NBitcoin
 			return new IPEndPoint(endpoint.Address.MapToIPv6Ex(), endpoint.Port);
 		}
 #endif
-		internal static byte[] ToBytes(uint value, bool littleEndian)
+		public static byte[] ToBytes(uint value, bool littleEndian)
 		{
 			if(littleEndian)
 			{
@@ -550,7 +550,7 @@ namespace NBitcoin
 				};
 			}
 		}
-		internal static byte[] ToBytes(ulong value, bool littleEndian)
+		public static byte[] ToBytes(ulong value, bool littleEndian)
 		{
 			if(littleEndian)
 			{
@@ -669,7 +669,6 @@ namespace NBitcoin
 				}
 				return hash;
 			}
-		}
-
+		}		
 	}
 }

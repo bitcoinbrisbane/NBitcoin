@@ -52,6 +52,20 @@ namespace NBitcoin.Protocol
 			get;
 			set;
 		}
+
+		public virtual bool Check(VersionPayload version)
+		{
+			if(MinVersion != null)
+			{
+				if(version.Version < MinVersion.Value)
+					return false;
+			}
+			if((RequiredServices & version.Services) != RequiredServices)
+			{
+				return false;
+			}
+			return true;
+		}
 	}
 
 
@@ -195,9 +209,9 @@ namespace NBitcoin.Protocol
 						NodeServerTrace.Information("Listening");
 						Exception unhandledException = null;
 						byte[] buffer = _Node._ReuseBuffer ? new byte[1024 * 1024] : null;
-						var stream = new Message.CustomNetworkStream(Socket, false);
 						try
 						{
+							var stream = new Message.CustomNetworkStream(Socket, false);
 							while(!Cancel.Token.IsCancellationRequested)
 							{
 								PerformanceCounter counter;
@@ -287,16 +301,11 @@ namespace NBitcoin.Protocol
 				if(previous != _State)
 				{
 					OnStateChanged(previous);
-				}
-
-				if(value == NodeState.Failed || value == NodeState.Offline)
-				{
-					TraceCorrelation.LogInside(() => NodeServerTrace.Trace.TraceEvent(TraceEventType.Stop, 0, "Communication closed"));
-				}
-
-				if(value == NodeState.Offline || value == NodeState.Failed)
-				{
-					OnDisconnected();
+					if(value == NodeState.Failed || value == NodeState.Offline)
+					{
+						TraceCorrelation.LogInside(() => NodeServerTrace.Trace.TraceEvent(TraceEventType.Stop, 0, "Communication closed"));
+						OnDisconnected();
+					}
 				}
 			}
 		}
@@ -463,9 +472,10 @@ namespace NBitcoin.Protocol
 			while(true)
 			{
 				parameters.ConnectCancellation.ThrowIfCancellationRequested();
-				if(addrman.Count == 0 || DateTimeOffset.UtcNow - start > TimeSpan.FromSeconds(30))
+				if(addrman.Count == 0 || DateTimeOffset.UtcNow - start > TimeSpan.FromSeconds(60))
 				{
 					addrman.DiscoverPeers(network, parameters);
+                    start = DateTimeOffset.UtcNow;
 				}
 				NetworkAddress addr = null;
 				while(true)
@@ -626,12 +636,12 @@ namespace NBitcoin.Protocol
 				{
 					Utils.SafeCloseSocket(socket);
 					NodeServerTrace.Error("Error connecting to the remote endpoint ", ex);
-					State = NodeState.Failed;
 					DisconnectReason = new NodeDisconnectReason()
 					{
 						Reason = "Unexpected exception while connecting to socket",
 						Exception = ex
 					};
+					State = NodeState.Failed;
 					if(addrman != null)
 						addrman.Attempt(Peer);
 					throw;
@@ -906,15 +916,8 @@ namespace NBitcoin.Protocol
 					Disconnect("Outdated version");
 					return;
 				}
-				if(requirements.MinVersion != null)
-				{
-					if(version.Version < requirements.MinVersion.Value)
-					{
-						Disconnect("The peer does not support the version requirement");
-						return;
-					}
-				}
-				if((requirements.RequiredServices & version.Services) != requirements.RequiredServices)
+
+				if(!requirements.Check(version))
 				{
 					Disconnect("The peer does not support the required services requirement");
 					return;
@@ -1009,7 +1012,7 @@ namespace NBitcoin.Protocol
 
 		public override string ToString()
 		{
-			return String.Format("{0} ({1})",  State, Peer.Endpoint);
+			return String.Format("{0} ({1})", State, Peer.Endpoint);
 		}
 
 		private Socket Socket
@@ -1116,7 +1119,7 @@ namespace NBitcoin.Protocol
 				foreach(var header in headers)
 				{
 					if(!header.Validate(Network))
-						throw new ProtocolException("An header which does not pass proof of work verificaiton has been received");
+						throw new ProtocolException("An header which does not pass proof of work verification has been received");
 				}
 			}
 			chain.SetTip(newTip);
@@ -1234,12 +1237,23 @@ namespace NBitcoin.Protocol
 			}
 		}
 
+		/// <summary>
+		/// Retrieve transactions from the mempool
+		/// </summary>
+		/// <param name="cancellationToken">Cancellation token</param>
+		/// <returns>Transactions in the mempool</returns>
 		public Transaction[] GetMempoolTransactions(CancellationToken cancellationToken = default(CancellationToken))
 		{
 			return GetMempoolTransactions(GetMempool(), cancellationToken);
 		}
 
-		Transaction[] GetMempoolTransactions(uint256[] txIds, CancellationToken cancellationToken = default(CancellationToken))
+		/// <summary>
+		/// Retrieve transactions from the mempool by ids
+		/// </summary>
+		/// <param name="txIds">Transaction ids to retrieve</param>
+		/// <param name="cancellationToken">Cancellation token</param>
+		/// <returns>The transactions, if a transaction is not found, then it is not returned in the array.</returns>
+		public Transaction[] GetMempoolTransactions(uint256[] txIds, CancellationToken cancellationToken = default(CancellationToken))
 		{
 			AssertState(NodeState.HandShaked);
 			if(txIds.Length == 0)
