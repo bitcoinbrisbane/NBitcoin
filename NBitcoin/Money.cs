@@ -219,10 +219,7 @@ namespace NBitcoin
 
 	public class Money : IComparable, IComparable<Money>, IEquatable<Money>, IMoney
 	{
-		public const long COIN = 100 * 1000 * 1000;
-		public const long CENT = COIN / 100;
-		public const long NANO = CENT / 100;
-
+		
 		// for decimal.TryParse. None of the NumberStyles' composed values is useful for bitcoin style
 		private const NumberStyles BitcoinStyle =
 						  NumberStyles.AllowLeadingWhite | NumberStyles.AllowTrailingWhite
@@ -618,7 +615,7 @@ namespace NBitcoin
 		/// <returns></returns>
 		public override string ToString()
 		{
-			return ToString(false, true);
+			return ToString(false, false);
 		}
 
 		/// <summary>
@@ -652,25 +649,18 @@ namespace NBitcoin
 			}
 		}
 
-		static Money _Dust = new Money(600);
-		public static Money Dust
-		{
-			get
-			{
-				return _Dust;
-			}
-		}
-
 		/// <summary>
 		/// Tell if amount is almost equal to this instance
 		/// </summary>
 		/// <param name="amount"></param>
-		/// <param name="dust">more or less dust (default : 600 satoshi)</param>
+		/// <param name="dust">more or less amount</param>
 		/// <returns>true if equals, else false</returns>
-		public bool Almost(Money amount, Money dust = null)
+		public bool Almost(Money amount, Money dust)
 		{
+			if(amount == null)
+				throw new ArgumentNullException("amount");
 			if(dust == null)
-				dust = Dust;
+				throw new ArgumentNullException("dust");
 			return (amount - this).Abs() <= dust;
 		}
 
@@ -682,6 +672,8 @@ namespace NBitcoin
 		/// <returns>true if equals, else false</returns>
 		public bool Almost(Money amount, decimal margin)
 		{
+			if(amount == null)
+				throw new ArgumentNullException("amount");
 			if(margin < 0.0m || margin > 1.0m)
 				throw new ArgumentOutOfRangeException("margin", "margin should be between 0 and 1");
 			var dust = Money.Satoshis((decimal)amount.Satoshi * margin);
@@ -766,6 +758,11 @@ namespace NBitcoin
 		}
 
 		#endregion
+
+		public const long COIN = 100 * 1000 * 1000;
+		public const long CENT = COIN / 100;
+		public const long NANO = CENT / 100;
+
 	}
 
 	static class CharExtensions

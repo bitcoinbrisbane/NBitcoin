@@ -31,12 +31,14 @@ namespace NBitcoin.Crypto
 
 
 		public static BigInteger HALF_CURVE_ORDER = null;
+		public static BigInteger CURVE_ORDER = null;
 		public static ECDomainParameters CURVE = null;
 		static ECKey()
 		{
 			X9ECParameters @params = CreateCurve();
 			CURVE = new ECDomainParameters(@params.Curve, @params.G, @params.N, @params.H);
 			HALF_CURVE_ORDER = @params.N.ShiftRight(1);
+			CURVE_ORDER = @params.N;
 		}
 
 		public ECKey(byte[] vch, bool isPrivate)
@@ -81,7 +83,7 @@ namespace NBitcoin.Crypto
 		public ECDSASignature Sign(uint256 hash)
 		{
 			AssertPrivateKey();
-			DeterministicECDSA signer = new DeterministicECDSA();
+			var signer = new DeterministicECDSA();
 			signer.setPrivateKey(PrivateKey);
 			var sig = ECDSASignature.FromDER(signer.signHash(hash.ToBytes()));
 			return sig.MakeCanonical();

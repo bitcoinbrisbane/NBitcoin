@@ -47,6 +47,34 @@ namespace NBitcoin
 			}
 		}
 
+		public static bool TryParse(string str, out OutPoint result)
+		{
+			result = null;
+			if(str == null)
+				throw new ArgumentNullException("str");
+			var splitted = str.Split('-');
+			if(splitted.Length != 2)
+				return false;
+
+			uint256 hash;
+			if(!uint256.TryParse(splitted[0], out hash))
+				return false;
+
+			uint index;
+			if(!uint.TryParse(splitted[1], out index))
+				return false;
+			result = new OutPoint(hash, index);
+			return true;
+		}
+
+		public static OutPoint Parse(string str)
+		{
+			OutPoint result;
+			if(TryParse(str, out result))
+				return result;
+			throw new FormatException("The format of the outpoint is incorrect");
+		}
+
 		public OutPoint()
 		{
 			SetNull();
@@ -215,6 +243,14 @@ namespace NBitcoin
 		{
 			var result = PayToPubkeyHashTemplate.Instance.ExtractScriptSigParameters(ScriptSig);
 			return result != null && result.PublicKey == pubKey;
+		}
+
+		public bool IsFinal
+		{
+			get
+			{
+				return (nSequence == uint.MaxValue);
+			}
 		}
 	}
 
@@ -554,20 +590,17 @@ namespace NBitcoin
 		}
 
 
-		public bool IsDust
+		public bool IsDust(FeeRate minRelayTxFee)
 		{
-			get
-			{
-				// "Dust" is defined in terms of CTransaction::nMinRelayTxFee,
-				// which has units satoshis-per-kilobyte.
-				// If you'd pay more than 1/3 in fees
-				// to spend something, then we consider it dust.
-				// A typical txout is 34 bytes big, and will
-				// need a CTxIn of at least 148 bytes to spend,
-				// so dust is a txout less than 546 satoshis 
-				// with default nMinRelayTxFee.
-				return ((value * 1000) / (3 * ((int)this.GetSerializedSize() + 148)) < Transaction.nMinRelayTxFee);
-			}
+			return (Value < GetDustThreshold(minRelayTxFee));
+		}
+
+		public Money GetDustThreshold(FeeRate minRelayTxFee)
+		{
+			if(minRelayTxFee == null)
+				throw new ArgumentNullException("minRelayTxFee");
+			int nSize = this.GetSerializedSize() + 148;
+			return 3 * minRelayTxFee.GetFee(nSize);
 		}
 
 		#region IBitcoinSerializable Members
@@ -791,7 +824,6 @@ namespace NBitcoin
 			vout = new TxOutList(this);
 		}
 
-		[Obsolete("Use Transaction.Parse statics method instead.")]
 		public Transaction(string hex)
 			: this()
 		{
@@ -877,9 +909,6 @@ namespace NBitcoin
 				return (Inputs.Count == 1 && Inputs[0].PrevOut.IsNull);
 			}
 		}
-
-		public const long nMinTxFee = 10000;  // Override with -mintxfee
-		public const long nMinRelayTxFee = 1000;
 
 		public static uint CURRENT_VERSION = 2;
 		public static uint MAX_STANDARD_TX_SIZE = 100000;
@@ -1026,6 +1055,58 @@ namespace NBitcoin
 			if(formatter == null)
 				throw new ArgumentNullException("formatter");
 			return formatter.ToString(this);
+		}
+
+		/// <summary>
+		/// Calculate the fee of the transaction
+		/// </summary>
+		/// <param name="spentCoins">Coins being spent</param>
+		/// <returns>Fee or null if some spent coins are missing or if spentCoins is null</returns>
+		public Money GetFee(ICoin[] spentCoins)
+		{
+			spentCoins = spentCoins ?? new ICoin[0];
+
+			Money fees = -TotalOut;
+			foreach(var input in this.Inputs)
+			{
+				var coin = spentCoins.FirstOrDefault(s => s.Outpoint == input.PrevOut);
+				if(coin == null)
+					return null;
+				fees += coin.TxOut.Value;
+			}
+			return fees;
+		}
+
+		/// <summary>
+		/// Calculate the fee rate of the transaction
+		/// </summary>
+		/// <param name="spentCoins">Coins being spent</param>
+		/// <returns>Fee or null if some spent coins are missing or if spentCoins is null</returns>
+		public FeeRate GetFeeRate(ICoin[] spentCoins)
+		{
+			var fee = GetFee(spentCoins);
+			if(fee == null)
+				return null;
+			return new FeeRate(fee, this.GetSerializedSize());
+		}
+
+		public bool IsFinal(ChainedBlock block)
+		{
+			if(block == null)
+				return IsFinal(Utils.UnixTimeToDateTime(0), 0);
+			return IsFinal(block.Header.BlockTime, block.Height);
+		}
+		public bool IsFinal(DateTimeOffset blockTime, int blockHeight)
+		{
+			var nBlockTime = Utils.DateTimeToUnixTime(blockTime);
+			if(nLockTime == 0)
+				return true;
+			if((long)nLockTime < ((long)nLockTime < LockTime.LOCKTIME_THRESHOLD ? (long)blockHeight : nBlockTime))
+				return true;
+			foreach(var txin in Inputs)
+				if(!txin.IsFinal)
+					return false;
+			return true;
 		}
 	}
 

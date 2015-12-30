@@ -159,9 +159,9 @@ namespace NBitcoin.RPC
     wallet             gettransaction               Yes
     wallet             getunconfirmedbalance
     wallet             getwalletinfo
-    wallet             importprivkey
+    wallet             importprivkey                Yes
     wallet             importwallet
-    wallet             importaddress
+    wallet             importaddress                Yes
     wallet             keypoolrefill
     wallet             listaccounts                 Yes
     wallet             listaddressgroupings         Yes
@@ -354,8 +354,8 @@ namespace NBitcoin.RPC
 					Services = ulong.Parse((string)peer["services"]),
 					LastSend = Utils.UnixTimeToDateTime((uint)peer["lastsend"]),
 					LastReceive = Utils.UnixTimeToDateTime((uint)peer["lastrecv"]),
-					BytesSent = (int)peer["bytessent"],
-					BytesReceived = (int)peer["bytesrecv"],
+					BytesSent = (long)peer["bytessent"],
+					BytesReceived = (long)peer["bytesrecv"],
 					ConnectionTime = Utils.UnixTimeToDateTime((uint)peer["conntime"]),
 					TimeOffset = TimeSpan.FromSeconds((int)peer["timeoffset"]),
 					PingTime = TimeSpan.FromSeconds((double)peer["pingtime"]),
@@ -671,6 +671,46 @@ namespace NBitcoin.RPC
 
 		#region Wallet
 
+		public void ImportPrivKey(BitcoinSecret secret)
+		{
+			SendCommand("importprivkey", secret.ToWif());
+		}
+
+		public void ImportPrivKey(BitcoinSecret secret, string label, bool rescan)
+		{
+			SendCommand("importprivkey", secret.ToWif(), label, rescan);
+		}
+
+		public async Task ImportPrivKeyAsync(BitcoinSecret secret)
+		{
+			await SendCommandAsync("importprivkey", secret.ToWif()).ConfigureAwait(false);
+		}
+
+		public async Task ImportPrivKeyAsync(BitcoinSecret secret, string label, bool rescan)
+		{
+			await SendCommandAsync("importprivkey", secret.ToWif(), label, rescan).ConfigureAwait(false);
+		}
+
+		public void ImportAddress(BitcoinAddress address)
+		{
+			SendCommand("importaddress", address.ToString());
+		}
+
+		public void ImportAddress(BitcoinAddress address, string label, bool rescan)
+		{
+			SendCommand("importaddress", address.ToString(), label, rescan);
+		}
+
+		public async Task ImportAddressAsync(BitcoinAddress address)
+		{
+			await SendCommandAsync("importaddress", address.ToString()).ConfigureAwait(false);
+		}
+
+		public async Task ImportAddressAsync(BitcoinAddress address, string label, bool rescan)
+		{
+			await SendCommandAsync("importaddress", address.ToString(), label, rescan).ConfigureAwait(false);
+		}
+
 		public BitcoinSecret DumpPrivKey(BitcoinAddress address)
 		{
 			var response = SendCommand("dumpprivkey", address.ToString());
@@ -713,9 +753,23 @@ namespace NBitcoin.RPC
 			return response.Result.Select(i => new UnspentCoin((JObject)i)).ToArray();
 		}
 
+		public UnspentCoin[] ListUnspent(int minconf, int maxconf, params BitcoinAddress[] addresses)
+		{
+			var addr = from a in addresses select a.ToString();
+			var response = SendCommand("listunspent", minconf, maxconf, addr.ToArray());
+			return response.Result.Select(i => new UnspentCoin((JObject)i)).ToArray();
+		}
+
 		public async Task<UnspentCoin[]> ListUnspentAsync()
 		{
 			var response = await SendCommandAsync("listunspent").ConfigureAwait(false);
+			return response.Result.Select(i => new UnspentCoin((JObject)i)).ToArray();
+		}
+
+		public async Task<UnspentCoin[]> ListUnspentAsync(int minconf, int maxconf, params BitcoinAddress[] addresses)
+		{
+			var addr = from a in addresses select a.ToString();
+			var response = await SendCommandAsync("listunspent", minconf, maxconf, addr.ToArray()).ConfigureAwait(false);
 			return response.Result.Select(i => new UnspentCoin((JObject)i)).ToArray();
 		}
 
@@ -865,11 +919,14 @@ namespace NBitcoin.RPC
 		/// </summary>
 		/// <param name="nblock"></param>
 		/// <returns></returns>
-		public Money EstimateFee(int nblock)
+		public FeeRate EstimateFee(int nblock)
 		{
 			var response = SendCommand(RPCOperations.estimatefee, nblock);
 			var result = response.Result.Value<decimal>();
-			return Money.Coins(result);
+			var money = Money.Coins(result);
+			if(money.Satoshi < 0)
+				money = Money.Zero;
+			return new FeeRate(money);
 		}
 
 		/// <summary>
@@ -916,8 +973,8 @@ namespace NBitcoin.RPC
 		public ulong Services { get; internal set; }
 		public DateTimeOffset LastSend { get; internal set; }
 		public DateTimeOffset LastReceive { get; internal set; }
-		public int BytesSent { get; internal set; }
-		public int BytesReceived { get; internal set; }
+		public long BytesSent { get; internal set; }
+		public long BytesReceived { get; internal set; }
 		public DateTimeOffset ConnectionTime { get; internal set; }
 		public TimeSpan PingTime { get; internal set; }
 		public int Version { get; internal set; }
